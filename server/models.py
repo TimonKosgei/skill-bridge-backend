@@ -18,12 +18,16 @@ class User(db.Model, SerializerMixin):
     #relationship
     courses = db.relationship('Course', back_populates='instructor')
     enrollments = db.relationship('Enrollment', back_populates='user')
-    reviews = db.relationship('Review', back_populates='user')
     discussions = db.relationship('Discussion', back_populates='user')
-    comments = db.relationship('Comment', back_populates='user')
+    comments = db.relationship('Comment', back_populates=None)  # One-directional relationship
+    lesson_reviews = db.relationship('LessonReview', back_populates='user')
 
     #serialization-rules
-    serialize_rules = ('-courses.instructor','-enrollments.user','-reviews.user','-discussions.user','-comments.user',)
+    serialize_rules = ('-courses.instructor',
+                       '-enrollments.user',
+                       '-discussions.user',
+                       '-lesson_reviews.user',
+                       '-comments.user')  # Exclude user reference in comments
 
 
 class Course(db.Model, SerializerMixin):
@@ -43,11 +47,13 @@ class Course(db.Model, SerializerMixin):
     instructor = db.relationship('User', back_populates='courses')
     lessons = db.relationship('Lesson', back_populates='course')
     enrollments = db.relationship('Enrollment', back_populates='course')
-    reviews = db.relationship('Review', back_populates='course')
     discussions = db.relationship('Discussion', back_populates='course')
 
     #serialization-rules
-    serialize_rules = ('-instructor.courses','-lessons.course','-enrollments.course','-reviews.course','-discussions.course',)
+    serialize_rules = ('-instructor.courses',
+                       '-lessons.course',
+                       '-enrollments.course',
+                       '-discussions.course',)
 
 class Lesson(db.Model, SerializerMixin):
     __tablename__ = 'lessons'
@@ -60,8 +66,9 @@ class Lesson(db.Model, SerializerMixin):
 
     #relationship
     course = db.relationship('Course', back_populates='lessons')
+    lesson_reviews = db.relationship('LessonReview', back_populates='lesson')
     #serialization-rules
-    serialize_rules = ('-course.lessons',)
+    serialize_rules = ('-course.lessons','-lesson_reviews.lesson')
 
 class Enrollment(db.Model, SerializerMixin):
     __tablename__ = 'enrollments'   
@@ -79,21 +86,7 @@ class Enrollment(db.Model, SerializerMixin):
     #serialization-rules
     serialize_rules = ('-user.enrollments','-course.enrollments',)
 
-class Review(db.Model, SerializerMixin):
-    __tablename__ = 'reviews'
 
-    review_id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.user_id'), nullable=False)
-    course_id = db.Column(db.Integer, db.ForeignKey('courses.course_id'), nullable=False)
-    rating = db.Column(db.Integer, nullable=False)
-    comment = db.Column(db.String(255), nullable=False)
-    review_date = db.Column(db.DateTime, nullable=False)
-
-    #relationship
-    user = db.relationship('User', back_populates='reviews')
-    course = db.relationship('Course', back_populates='reviews')
-    #serialization-rules
-    serialize_rules = ('-user.reviews','-course.reviews',)
 
 class Discussion(db.Model, SerializerMixin):
     __tablename__ = 'discussions'
@@ -108,10 +101,15 @@ class Discussion(db.Model, SerializerMixin):
     #relationship
     user = db.relationship('User', back_populates='discussions')
     course = db.relationship('Course', back_populates='discussions')
-    comments = db.relationship('Comment', back_populates='discussion')
+    comments = db.relationship('Comment', back_populates=None)  # One-directional relationship
+
+    # Custom property to access the user's username
+    @property
+    def user_username(self):
+        return self.user.username if self.user else None
 
     #serialization-rules
-    serialize_rules = ('-user.discussions','-course.discussions','-comments.discussion',)
+    serialize_rules = ('-user', '-course', '-comments', 'user_username')  # Include user_username
 
 class Comment(db.Model,SerializerMixin):
     __tablename__ = 'comments'
@@ -122,9 +120,50 @@ class Comment(db.Model,SerializerMixin):
     content = db.Column(db.String(255), nullable=False)
     comment_date = db.Column(db.DateTime, nullable=False)
 
-    #relationship
-    user = db.relationship('User', back_populates='comments')
-    discussion = db.relationship('Discussion', back_populates='comments')
+    # Custom property to access the user's username
+    @property
+    def user_username(self):
+        user = User.query.get(self.user_id)
+        return user.username if user else None
+
+    # Custom property to access the discussion title
+    @property
+    def discussion_title(self):
+        discussion = Discussion.query.get(self.discussion_id)
+        return discussion.title if discussion else None
 
     #serialization-rules
-    serialize_rules = ('-user.comments','-discussion.comments',)
+    serialize_rules = ('discussion_title', 'user_username')  # Include user_username
+
+
+class LessonReview(db.Model, SerializerMixin):
+    __tablename__ = 'lesson_reviews'
+
+    review_id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.user_id'), nullable=False)
+    lesson_id = db.Column(db.Integer, db.ForeignKey('lessons.lesson_id'), nullable=False)
+    rating = db.Column(db.Integer, nullable=False)
+    comment = db.Column(db.String(255), nullable=False)
+    review_date = db.Column(db.DateTime, nullable=False)
+
+    # Relationships
+    user = db.relationship('User', back_populates='lesson_reviews')
+    lesson = db.relationship('Lesson', back_populates='lesson_reviews')
+
+    # Serialization rules
+    serialize_rules = (
+        '-user',         
+        '-lesson',       
+        'user_username',  
+        'user_first_name' 
+    )
+
+    # Custom property: Username
+    @property
+    def user_username(self):
+        return self.user.username if self.user else None
+
+    # Custom property: First Name
+    @property
+    def user_first_name(self):
+        return self.user.first_name if self.user else None

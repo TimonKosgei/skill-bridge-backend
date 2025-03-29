@@ -7,7 +7,7 @@ from flask_cors import CORS
 from flask_migrate import Migrate
 from datetime import datetime
 from database import db
-from models import User, Course, Enrollment, Lesson
+from models import User, Course, Enrollment, Lesson, LessonReview, Discussion, Comment
 from sqlalchemy.exc import IntegrityError
 import boto3
 from werkzeug.utils import secure_filename
@@ -329,7 +329,19 @@ class Lessons(Resource):
             return make_response('', 204)
         except Exception as e:
             return make_response(jsonify({'error': str(e)}), 500)
+
+class LessonByID(Resource):
+    def get(self, lesson_id):
+        try:
+            lesson = Lesson.query.filter_by(lesson_id  = lesson_id).first()
+            if not lesson:
+                    return make_response(jsonify({'error': 'Lesson not found'}), 404)
+            return make_response(jsonify(lesson.to_dict()),200)
+        except Exception as e:
+            return make_response(jsonify({'error': str(e)}), 500)
+
         
+
 class FileUpload(Resource):
     def post(self):
         try:
@@ -348,6 +360,159 @@ class FileUpload(Resource):
             return make_response(jsonify({'error': str(e)}), 500)
         
 
+class Discussions(Resource):
+    def get(self):
+        """Fetch all discussions."""
+        try:
+            discussions = Discussion.query.all()
+            return make_response(jsonify([discussion.to_dict() for discussion in discussions]), 200)
+        except Exception as e:
+            return make_response(jsonify({'error': str(e)}), 500)
+
+    def post(self):
+        """Create a new discussion."""
+        try:
+            data = request.get_json()
+            discussion = Discussion(
+                user_id=data.get('user_id'),
+                course_id=data.get('course_id'),
+                title=data.get('title'),
+                content=data.get('content'),
+                discussion_date=datetime.utcnow()
+            )
+            db.session.add(discussion)
+            db.session.commit()
+            return make_response(jsonify(discussion.to_dict()), 201)
+        except Exception as e:
+            db.session.rollback()
+            return make_response(jsonify({'error': str(e)}), 500)
+
+
+class DiscussionById(Resource):
+    def get(self, discussion_id):
+        """Fetch a specific discussion by ID."""
+        try:
+            discussion = Discussion.query.filter_by(discussion_id=discussion_id).first()
+            if not discussion:
+                return make_response(jsonify({'error': 'Discussion not found'}), 404)
+            return make_response(jsonify(discussion.to_dict()), 200)
+        except Exception as e:
+            return make_response(jsonify({'error': str(e)}), 500)
+
+    def patch(self, discussion_id):
+        """Update a specific discussion."""
+        try:
+            data = request.get_json()
+            discussion = Discussion.query.filter_by(discussion_id=discussion_id).first()
+            if not discussion:
+                return make_response(jsonify({'error': 'Discussion not found'}), 404)
+            for key, value in data.items():
+                setattr(discussion, key, value)
+            db.session.commit()
+            return make_response(jsonify(discussion.to_dict()), 200)
+        except Exception as e:
+            db.session.rollback()
+            return make_response(jsonify({'error': str(e)}), 500)
+
+    def delete(self, discussion_id):
+        """Delete a specific discussion."""
+        try:
+            discussion = Discussion.query.filter_by(discussion_id=discussion_id).first()
+            if not discussion:
+                return make_response(jsonify({'error': 'Discussion not found'}), 404)
+            db.session.delete(discussion)
+            db.session.commit()
+            return make_response('', 204)
+        except Exception as e:
+            db.session.rollback()
+            return make_response(jsonify({'error': str(e)}), 500)
+
+
+class Comments(Resource):
+    def get(self):
+        """Fetch all comments."""
+        try:
+            comments = Comment.query.all()
+            return make_response(jsonify([comment.to_dict() for comment in comments]), 200)
+        except Exception as e:
+            return make_response(jsonify({'error': str(e)}), 500)
+
+    def post(self):
+        """Create a new comment."""
+        try:
+            data = request.get_json()
+            comment = Comment(
+                user_id=data.get('user_id'),
+                discussion_id=data.get('discussion_id'),
+                content=data.get('content'),
+                comment_date=datetime.utcnow()
+            )
+            db.session.add(comment)
+            db.session.commit()
+            return make_response(jsonify(comment.to_dict()), 201)
+        except Exception as e:
+            db.session.rollback()
+            return make_response(jsonify({'error': str(e)}), 500)
+
+
+class CommentById(Resource):
+    def get(self, comment_id):
+        """Fetch a specific comment by ID."""
+        try:
+            comment = Comment.query.filter_by(comment_id=comment_id).first()
+            if not comment:
+                return make_response(jsonify({'error': 'Comment not found'}), 404)
+            return make_response(jsonify(comment.to_dict()), 200)
+        except Exception as e:
+            return make_response(jsonify({'error': str(e)}), 500)
+
+    def patch(self, comment_id):
+        """Update a specific comment."""
+        try:
+            data = request.get_json()
+            comment = Comment.query.filter_by(comment_id=comment_id).first()
+            if not comment:
+                return make_response(jsonify({'error': 'Comment not found'}), 404)
+            for key, value in data.items():
+                setattr(comment, key, value)
+            db.session.commit()
+            return make_response(jsonify(comment.to_dict()), 200)
+        except Exception as e:
+            db.session.rollback()
+            return make_response(jsonify({'error': str(e)}), 500)
+
+    def delete(self, comment_id):
+        """Delete a specific comment."""
+        try:
+            comment = Comment.query.filter_by(comment_id=comment_id).first()
+            if not comment:
+                return make_response(jsonify({'error': 'Comment not found'}), 404)
+            db.session.delete(comment)
+            db.session.commit()
+            return make_response('', 204)
+        except Exception as e:
+            db.session.rollback()
+            return make_response(jsonify({'error': str(e)}), 500)
+
+class Lessonreviews(Resource):
+    def post(self):
+        try:
+            data = request.get_json()
+            lesson_review = LessonReview(
+                user_id=data.get('user_id'),
+                lesson_id=data.get('lesson_id'),
+                rating=data.get('rating'),
+                comment=data.get('comment'),
+                review_date=datetime.utcnow()
+            )
+            db.session.add(lesson_review)
+            db.session.commit()
+            return make_response(jsonify(lesson_review.to_dict()), 201)
+        except Exception as e:
+            db.session.rollback()
+            return make_response(jsonify({'error': str(e)}), 500)
+
+api.add_resource(Lessonreviews, '/lessonreviews')
 api.add_resource(Logout, '/logout')
 api.add_resource(Login, '/login')
 api.add_resource(FileUpload, '/upload')
@@ -356,7 +521,12 @@ api.add_resource(CourseById, '/courses/<int:course_id>')
 api.add_resource(Courses, '/courses')
 api.add_resource(Enrollments, '/enrollments')
 api.add_resource(Lessons, '/lessons')
+api.add_resource(LessonByID, '/lessons/<int:lesson_id>')
 api.add_resource(UserPost, '/users')
+api.add_resource(Discussions, '/discussions')
+api.add_resource(DiscussionById, '/discussions/<int:discussion_id>')
+api.add_resource(Comments, '/comments')
+api.add_resource(CommentById, '/comments/<int:comment_id>')
 
 if __name__ == '__main__':
     app.run(debug=True)
