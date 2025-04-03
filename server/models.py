@@ -167,3 +167,5 @@ class LessonReview(db.Model, SerializerMixin):
     @property
     def user_first_name(self):
         return self.user.first_name if self.user else None
+
+
