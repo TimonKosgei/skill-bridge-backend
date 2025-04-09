@@ -1,5 +1,7 @@
 from database import db
+from datetime import datetime
 from sqlalchemy_serializer import SerializerMixin
+
 
 class User(db.Model, SerializerMixin):
     __tablename__ = 'users'
@@ -21,13 +23,44 @@ class User(db.Model, SerializerMixin):
     discussions = db.relationship('Discussion', back_populates='user')
     comments = db.relationship('Comment', back_populates=None)  # One-directional relationship
     lesson_reviews = db.relationship('LessonReview', back_populates='user')
+    lesson_progress = db.relationship('LessonProgress', back_populates='user')
 
     #serialization-rules
     serialize_rules = ('-courses.instructor',
                        '-enrollments.user',
                        '-discussions.user',
                        '-lesson_reviews.user',
-                       '-comments.user')  # Exclude user reference in comments
+                       '-comments.user',
+                       '-lesson_progress.user')  # Exclude user reference in comments
+    def get_course_progress(self, course_id):
+        """Returns detailed progress stats for a course"""
+        enrollment = Enrollment.query.filter_by(
+            user_id=self.user_id,
+            course_id=course_id
+        ).first()
+        
+        if not enrollment:
+            return None
+            
+        lessons = Lesson.query.filter_by(course_id=course_id).all()
+        progress_data = []
+        
+        for lesson in lessons:
+            progress = LessonProgress.query.filter_by(
+                user_id=self.user_id,
+                lesson_id=lesson.lesson_id
+            ).first()
+            
+            progress_data.append({
+                'lesson_id': lesson.lesson_id,
+                'progress': progress.watched_duration / lesson.duration if (progress and lesson.duration) else 0,
+                'completed': progress.is_completed if progress else False
+            })
+            
+        return {
+            'enrollment': enrollment,
+            'lessons': progress_data
+        }
 
 
 class Course(db.Model, SerializerMixin):
@@ -42,6 +75,7 @@ class Course(db.Model, SerializerMixin):
     last_update = db.Column(db.DateTime, nullable=False)
     course_image_url = db.Column(db.String(255), nullable=True)
     is_published = db.Column(db.Boolean, nullable=False)
+    total_duration = db.Column(db.Integer, default=0)  
 
     #relationship
     instructor = db.relationship('User', back_populates='courses')
@@ -55,6 +89,7 @@ class Course(db.Model, SerializerMixin):
                        '-enrollments.course',
                        '-discussions.course',)
 
+
 class Lesson(db.Model, SerializerMixin):
     __tablename__ = 'lessons'
 
@@ -63,12 +98,15 @@ class Lesson(db.Model, SerializerMixin):
     title = db.Column(db.String(80), nullable=False)
     description = db.Column(db.String(255), nullable=False)
     video_url = db.Column(db.String(255), nullable=False)
-
+    duration = db.Column(db.Integer, nullable=True)
     #relationship
     course = db.relationship('Course', back_populates='lessons')
     lesson_reviews = db.relationship('LessonReview', back_populates='lesson')
+    lesson_progress = db.relationship('LessonProgress', back_populates='lesson')
+
     #serialization-rules
-    serialize_rules = ('-course.lessons','-lesson_reviews.lesson')
+    serialize_rules = ('-course.lessons','-lesson_reviews.lesson','-lesson_progress.lesson',)
+
 
 class Enrollment(db.Model, SerializerMixin):
     __tablename__ = 'enrollments'   
@@ -76,15 +114,44 @@ class Enrollment(db.Model, SerializerMixin):
     enrollment_id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.user_id'), nullable=False)
     course_id = db.Column(db.Integer, db.ForeignKey('courses.course_id'), nullable=False)
-    enrollment_date = db.Column(db.DateTime, nullable=False)
-    progress = db.Column(db.Integer, nullable=False)
-
+    enrollment_date = db.Column(db.DateTime, default=datetime.utcnow)
+    progress = db.Column(db.Integer, default=0)  # Tracks progress as a percentage
+    completed_date = db.Column(db.DateTime, nullable=True)  # Tracks when course was fully completed
+    is_completed = db.Column(db.Boolean, default=False)
     #relationship
     user = db.relationship('User', back_populates='enrollments')
     course = db.relationship('Course', back_populates='enrollments')
 
     #serialization-rules
     serialize_rules = ('-user.enrollments','-course.enrollments',)
+
+    def update_enrollment_progress(self):
+        course_id = self.course_id
+        user_id = self.user_id
+
+        total_lessons = Lesson.query.filter_by(course_id=course_id).count()
+
+        completed_lessons = LessonProgress.query.filter_by(
+            user_id=user_id,
+            is_completed=True
+        ).join(Lesson).filter(Lesson.course_id == course_id).count()
+
+        if total_lessons > 0:
+            progress_percentage = (completed_lessons / total_lessons) * 100
+        else:
+            progress_percentage = 0
+
+        enrollment = Enrollment.query.filter_by(
+            user_id=user_id,
+            course_id=course_id
+        ).first()
+
+        if enrollment:
+            enrollment.progress = progress_percentage
+            # Mark the course as completed if all lessons are completed
+            enrollment.is_completed = (completed_lessons == total_lessons and total_lessons > 0)
+            db.session.commit()
+
 
 
 
@@ -169,3 +236,36 @@ class LessonReview(db.Model, SerializerMixin):
         return self.user.first_name if self.user else None
 
 
+class LessonProgress(db.Model, SerializerMixin):
+    __tablename__ = 'lesson_progress'
+
+    progress_id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.user_id'), nullable=False)
+    lesson_id = db.Column(db.Integer, db.ForeignKey('lessons.lesson_id'), nullable=False)
+    watched_duration = db.Column(db.Integer, nullable=False, default=0)  # In seconds
+    is_completed = db.Column(db.Boolean, default=False)
+    last_watched_date = db.Column(db.DateTime, nullable=True)
+
+    # Relationships
+    user = db.relationship('User', back_populates='lesson_progress')
+    lesson = db.relationship('Lesson', back_populates='lesson_progress')
+
+    # Custom properties for serialization
+    @property
+    def user_username(self):
+        return self.user.username if self.user else None
+
+    @property
+    def lesson_title(self):
+        return self.lesson.title if self.lesson else None
+
+    # Serialization rules
+    serialize_rules = ('-user', '-lesson', 'user_username', 'lesson_title')
+
+    def check_completion(self, threshold=0.95):
+        """Auto-mark complete if watched enough (call after updating watched_duration)"""
+        if not self.is_completed and self.lesson.duration:
+            if (self.watched_duration / self.lesson.duration) >= threshold:
+                self.is_completed = True
+                self.last_watched_date = datetime.utcnow()
+        return self.is_completed
