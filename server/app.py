@@ -7,12 +7,13 @@ from flask_cors import CORS
 from flask_migrate import Migrate
 from datetime import datetime, timedelta
 from database import db
-from models import User, Course, Enrollment, Lesson, LessonReview, Discussion, Comment, LessonProgress
+from models import User, Course, Enrollment, Lesson, LessonReview, Discussion, Comment, LessonProgress, UserBadge, Badge
 from sqlalchemy.exc import IntegrityError
 import boto3
 from werkzeug.utils import secure_filename
 import uuid
 from moviepy.video.io.VideoFileClip import VideoFileClip  # Import for video duration
+from badge_utils import check_and_award_badges
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///app.db'
@@ -514,6 +515,7 @@ class Discussions(Resource):
         """Create a new discussion."""
         try:
             data = request.get_json()
+            user = User.query.filter_by(user_id=data.get('user_id')).first()
             discussion = Discussion(
                 user_id=data.get('user_id'),
                 course_id=data.get('course_id'),
@@ -523,6 +525,8 @@ class Discussions(Resource):
             )
             db.session.add(discussion)
             db.session.commit()
+            # Check and award badges if criteria met
+            check_and_award_badges(user)
             return make_response(jsonify(discussion.to_dict()), 201)
         except Exception as e:
             db.session.rollback()
@@ -580,6 +584,7 @@ class Comments(Resource):
         """Create a new comment."""
         try:
             data = request.get_json()
+            user = User.query.filter_by(user_id=data.get('user_id')).first()
             comment = Comment(
                 user_id=data.get('user_id'),
                 discussion_id=data.get('discussion_id'),
@@ -588,6 +593,8 @@ class Comments(Resource):
             )
             db.session.add(comment)
             db.session.commit()
+            #check and award badges if criteria met
+            check_and_award_badges(user)
             return make_response(jsonify(comment.to_dict()), 201)
         except Exception as e:
             db.session.rollback()
@@ -600,6 +607,7 @@ class CommentById(Resource):
             comment = Comment.query.filter_by(comment_id=comment_id).first()
             if not comment:
                 return make_response(jsonify({'error': 'Comment not found'}), 404)
+            
             return make_response(jsonify(comment.to_dict()), 200)
         except Exception as e:
             return make_response(jsonify({'error': str(e)}), 500)
@@ -608,12 +616,15 @@ class CommentById(Resource):
         """Update a specific comment."""
         try:
             data = request.get_json()
+            user = User.query.filter_by(user_id=data.get('user_id')).first()
             comment = Comment.query.filter_by(comment_id=comment_id).first()
             if not comment:
                 return make_response(jsonify({'error': 'Comment not found'}), 404)
             for key, value in data.items():
                 setattr(comment, key, value)
             db.session.commit()
+            # Check and award badges if criteria met
+            check_and_award_badges(user)
             return make_response(jsonify(comment.to_dict()), 200)
         except Exception as e:
             db.session.rollback()
@@ -692,6 +703,7 @@ class LessonProgressResource(Resource):
         lesson_id = data.get('lesson_id')
         watched_duration = data.get('watched_duration')
 
+        user = User.query.get(user_id)
         progress = LessonProgress.query.filter_by(user_id=user_id, lesson_id=lesson_id).first()
         if not progress:
             return {"message": "Progress not found"}, 404
@@ -701,6 +713,10 @@ class LessonProgressResource(Resource):
 
         # Check and mark as completed if enough is watched
         progress.check_completion()
+
+        #award badge
+        check_and_award_badges(user)
+
 
         db.session.commit()
         # Update enrollment progress if exists
@@ -718,8 +734,45 @@ class UserProgressListResource(Resource):
         return [p.to_dict() for p in progress], 200
 
 
+class Badges(Resource):
+    def get(self, user_id):
+        user = User.query.filter_by(user_id=user_id).first()
+        if not user:
+            return make_response(jsonify({'error': 'User not found'}), 404)
+        badges = UserBadge.query.filter_by(user_id=user_id).all()
+        return make_response(jsonify([badge.to_dict() for badge in badges]), 200)
 
+class Leaderboard(Resource):
+    def get(self):
+        """Fetch users sorted by total XP."""
+        try:
+            # Query all users
+            users = User.query.all()
+            leaderboard = []
 
+            for user in users:
+                # Calculate total XP as the sum of XP from all badges the user has
+                total_xp = sum(user_badge.badge.xp_value for user_badge in UserBadge.query.filter_by(user_id=user.user_id).all())
+
+                leaderboard.append({
+                    "user_id": user.user_id,
+                    "name": f"{user.first_name} {user.last_name}",
+                    "email": user.email,
+                    "profile_picture": user.profile_picture_url,
+                    "total_xp": total_xp
+                })
+
+            # Sort the leaderboard by total XP in descending order
+            leaderboard.sort(key=lambda x: x['total_xp'], reverse=True)
+
+            return make_response(jsonify(leaderboard), 200)
+        except Exception as e:
+            return make_response(jsonify({'error': 'Failed to fetch leaderboard', 'details': str(e)}), 500)
+
+# Add the new resource to the API
+api.add_resource(Leaderboard, '/leaderboard')
+
+api.add_resource(Badges, '/users/<int:user_id>/badges')
 api.add_resource(EnrollmentByCourseId, '/enrollments/<int:course_id>')
 api.add_resource(LessonProgressResource, '/progress')
 api.add_resource(UserProgressListResource, '/users/<int:user_id>/progress')

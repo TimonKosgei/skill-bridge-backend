@@ -16,7 +16,7 @@ class User(db.Model, SerializerMixin):
     bio = db.Column(db.String(255), nullable=True)
     role = db.Column(db.String(80), nullable=False)
     registration_date = db.Column(db.DateTime, nullable=False)
-
+    
     #relationship
     courses = db.relationship('Course', back_populates='instructor')
     enrollments = db.relationship('Enrollment', back_populates='user')
@@ -24,6 +24,7 @@ class User(db.Model, SerializerMixin):
     comments = db.relationship('Comment', back_populates=None)  # One-directional relationship
     lesson_reviews = db.relationship('LessonReview', back_populates='user')
     lesson_progress = db.relationship('LessonProgress', back_populates='user')
+    badges = db.relationship('UserBadge', back_populates='user')
 
     #serialization-rules
     serialize_rules = ('-courses.instructor',
@@ -269,3 +270,38 @@ class LessonProgress(db.Model, SerializerMixin):
                 self.is_completed = True
                 self.last_watched_date = datetime.utcnow()
         return self.is_completed
+
+class Badge(db.Model, SerializerMixin):
+    __tablename__ = 'badges'
+    
+    badge_id = db.Column(db.Integer, primary_key=True)
+    emoji = db.Column(db.String(10), nullable=False)  # Stores the emoji character
+    name = db.Column(db.String(80), nullable=False)
+    description = db.Column(db.String(255), nullable=False)
+    criteria_type = db.Column(db.String(50), nullable=False)
+    criteria_value = db.Column(db.String(255), nullable=True)
+    tier = db.Column(db.String(20), nullable=True)
+    xp_value = db.Column(db.Integer, default=0)
+    is_hidden = db.Column(db.Boolean, default=False)
+    created_date = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Relationships remain the same
+    user_badges = db.relationship('UserBadge', back_populates='badge')
+    
+    # Serialization rules
+    serialize_rules = ('-user_badges.badge',)
+
+class UserBadge(db.Model, SerializerMixin):
+    __tablename__ = 'user_badges'
+    
+    user_badge_id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.user_id'), nullable=False)
+    badge_id = db.Column(db.Integer, db.ForeignKey('badges.badge_id'), nullable=False, unique=True)
+    earned_date = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    user = db.relationship('User', back_populates='badges')
+    badge = db.relationship('Badge', back_populates='user_badges')
+    
+    # Serialization rules
+    serialize_rules = ('-user', '-badge.user_badges')
