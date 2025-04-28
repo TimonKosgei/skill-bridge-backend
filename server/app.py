@@ -14,7 +14,8 @@ from werkzeug.utils import secure_filename
 import uuid
 from moviepy.video.io.VideoFileClip import VideoFileClip  # Import for video duration
 from badge_utils import check_and_award_badges
-from itsdangerous import UrlSafeTimedSerializer, BadSignature, SignatureExpired
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+from email_utils import configure_mail, confirm_token,send_email, generate_confirmation_token
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///app.db'
@@ -32,6 +33,9 @@ api = Api(app)
 # Amazon S3
 s3 = boto3.client('s3', verify = False)
 BUCKET_NAME = 'skillbridge28'
+
+# Configure email
+mail = configure_mail(app)
 
 # JWT Helper Functions
 def generate_jwt(user_id, username,role):
@@ -60,69 +64,82 @@ class Signup(Resource):
     def post(self):
         data = request.get_json()
         
-        # Check if request data is valid JSON
-        if not data:
-            return make_response(jsonify({'error': 'No data provided'}), 400)
-        
+        # Validate input
         required_fields = ['username', 'email', 'password', 'first_name', 'last_name']
         for field in required_fields:
-            if field not in data or not data.get(field):
-                return make_response(jsonify({'error': f'{field} is required'}), 400)
+            if field not in data or not data[field]:
+                return {"error": f"{field} is required"}, 400
         
+        # Hash the password
+        hashed_password = bcrypt.hashpw(data['password'].encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        
+        # Create user
         try:
-            # Hash the password
-            password = data.get('password')
-            if not isinstance(password, str) or len(password) < 8:
-                return make_response(jsonify({'error': 'Password must be at least 8 characters'}), 400)
-            
-            hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-
             user = User(
                 username=data.get('username'),
                 email=data.get('email'),
                 password=hashed_password,
                 first_name=data.get('first_name'),
                 last_name=data.get('last_name'),
-                profile_picture_url=data.get('profile_picture_url', ''),  # Default empty string if not provided
-                bio=data.get('bio', ''),
-                role=data.get('role'),  
-                registration_date=datetime.now()
+                role=data.get('role', 'Learner'), 
+                registration_date=datetime.utcnow(),
+                is_confirmed=False  # Add this field to track email confirmation
             )
-            
             db.session.add(user)
             db.session.commit()
-            return make_response(jsonify(user.to_dict()), 201)
             
-        except IntegrityError as e:
-            db.session.rollback()
-            if 'username' in str(e):
-                return make_response(jsonify({'error': 'Username already in use'}), 400)
-            elif 'email' in str(e):
-                return make_response(jsonify({'error': 'Email already in use'}), 400)
+            # Generate confirmation token
+            token = generate_confirmation_token(user.email, app.secret_key)
+            confirm_url = f"http://localhost:3000/confirm/{token}"  # Replace with your frontend URL if needed
+            
+            # Send confirmation email
+            subject = "Confirm Your Email"
+            body = f"Please confirm your email by clicking the following link: {confirm_url}"
+            if send_email(subject, user.email, body):
+                return {"message": "User created successfully. Please check your email to confirm your account."}, 201
             else:
-                return make_response(jsonify({'error': 'Database integrity error'}), 400)
-                
-        except BadRequest:
-            return make_response(jsonify({'error': 'Invalid JSON data'}), 400)
-            
+                return {"error": "Failed to send confirmation email"}, 500
+        
+        
         except Exception as e:
             db.session.rollback()
-            # Avoid exposing internal errors in production
-            return make_response(jsonify({'error': 'Failed to create user'}), 500)
+            return {"error": str(e)}, 500
 
 class Login(Resource):
     def post(self):
         data = request.get_json()
         email = data.get('email')
         password = data.get('password')
+
+        # Check if the user exists
         user = User.query.filter_by(email=email).first()
         if not user:
             return make_response(jsonify({'error': 'Invalid email or password'}), 401)
+
+        # Check if the password is correct
         if not bcrypt.checkpw(password.encode('utf-8'), user.password.encode('utf-8')):
             return make_response(jsonify({'error': 'Invalid email or password'}), 401)
-        
-        # Generate JWT token
-        token = generate_jwt(user.user_id,user.username,user.role)
+
+        # Check if the user's email is confirmed
+        if not user.is_confirmed:
+            # Generate a new confirmation token
+            token = generate_confirmation_token(user.email, app.secret_key)
+            confirm_url = f"http://localhost:3000/confirm/{token}"  # Replace with your frontend URL if needed
+
+            # Send a new confirmation email
+            subject = "Confirm Your Email"
+            body = f"Please confirm your email by clicking the following link: {confirm_url}"
+            if send_email( subject, user.email, body):
+                return make_response(jsonify({
+                    "error": "Email not confirmed. A new confirmation email has been sent to your email address."
+                }), 403)
+            else:
+                return make_response(jsonify({
+                    "error": "Email not confirmed, and we failed to send a confirmation email. Please try again later."
+                }), 500)
+
+        # Generate JWT token for confirmed users
+        token = generate_jwt(user.user_id, user.username, user.role)
         return make_response(jsonify({"message": "Login successful", "token": token}), 200)
 
 class UserPost(Resource):
@@ -769,10 +786,80 @@ class Leaderboard(Resource):
         except Exception as e:
             return make_response(jsonify({'error': 'Failed to fetch leaderboard', 'details': str(e)}), 500)
 
+class ConfirmEmail(Resource):
+    def get(self, token):
+        email = confirm_token(token, app.secret_key)
+        if not email:
+            return {"error": "Invalid or expired token"}, 400
         
-# Add the new resource to the API
-api.add_resource(Leaderboard, '/leaderboard')
+        user = User.query.filter_by(email=email).first()
+        if not user:
+            return {"error": "User not found"}, 404
+        
+        user.is_confirmed = True
+        db.session.commit()
+        return {"message": "Email confirmed successfully"}, 200
 
+class ForgotPassword(Resource):
+    def post(self):
+        data = request.get_json()
+        email = data.get('email')
+
+        if not email:
+            return {"error": "Email is required"}, 400
+
+        user = User.query.filter_by(email=email).first()
+        if not user:
+            return {"error": "User with this email does not exist"}, 404
+
+        # Generate a reset token
+        token = generate_confirmation_token(email, app.secret_key)
+
+        # Construct the reset URL
+        reset_url = f"http://localhost:3000/reset-password/{token}"  # Replace with your frontend URL
+
+        # Send the reset email
+        subject = "Password Reset Request"
+        body = f"To reset your password, click the following link: {reset_url}\n\nIf you did not request this, please ignore this email."
+        if send_email(subject, email, body):
+            return {"message": "Password reset email sent successfully"}, 200
+        else:
+            return {"error": "Failed to send password reset email"}, 500
+
+class ResetPassword(Resource):
+    def post(self):
+        data = request.get_json()
+        token = data.get('token')
+        new_password = data.get('new_password')
+
+        if not token or not new_password:
+            return {"error": "Token and new password are required"}, 400
+
+        # Validate the token
+        email = confirm_token(token, app.secret_key)
+        if not email:
+            return {"error": "Invalid or expired token"}, 400
+
+        # Find the user by email
+        user = User.query.filter_by(email=email).first()
+        if not user:
+            return {"error": "User not found"}, 404
+
+        # Hash the new password
+        hashed_password = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+        # Update the user's password
+        user.password = hashed_password
+        db.session.commit()
+
+        return {"message": "Password reset successfully"}, 200
+
+# Add the ResetPassword resource to the API
+api.add_resource(ResetPassword, '/reset-password')
+
+# Add the new resource to the API
+api.add_resource(ForgotPassword, '/forgot-password')
+api.add_resource(Leaderboard, '/leaderboard')
 api.add_resource(Badges, '/users/<int:user_id>/badges')
 api.add_resource(EnrollmentByCourseId, '/enrollments/<int:course_id>')
 api.add_resource(LessonProgressResource, '/progress')
@@ -790,6 +877,7 @@ api.add_resource(UserPost, '/users')
 api.add_resource(Discussions, '/discussions')
 api.add_resource(DiscussionById, '/discussions/<int:discussion_id>')
 api.add_resource(Comments, '/comments')
+api.add_resource(ConfirmEmail, '/confirm/<string:token>')
 
 if __name__ == '__main__':
     app.run(debug=True)

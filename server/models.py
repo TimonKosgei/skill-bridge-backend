@@ -16,6 +16,7 @@ class User(db.Model, SerializerMixin):
     bio = db.Column(db.String(255), nullable=True)
     role = db.Column(db.String(80), nullable=False)
     registration_date = db.Column(db.DateTime, nullable=False)
+    is_confirmed = db.Column(db.Boolean, default=False)
     
     #relationship
     courses = db.relationship('Course', back_populates='instructor')
@@ -298,7 +299,7 @@ class UserBadge(db.Model, SerializerMixin):
     
     user_badge_id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.user_id'), nullable=False)
-    badge_id = db.Column(db.Integer, db.ForeignKey('badges.badge_id'), nullable=False, unique=True)
+    badge_id = db.Column(db.Integer, db.ForeignKey('badges.badge_id'), nullable=False)
     earned_date = db.Column(db.DateTime, default=datetime.utcnow)
     
     # Relationships
