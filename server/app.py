@@ -14,6 +14,7 @@ from werkzeug.utils import secure_filename
 import uuid
 from moviepy.video.io.VideoFileClip import VideoFileClip  # Import for video duration
 from badge_utils import check_and_award_badges
+from itsdangerous import UrlSafeTimedSerializer, BadSignature, SignatureExpired
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///app.db'
@@ -33,11 +34,12 @@ s3 = boto3.client('s3', verify = False)
 BUCKET_NAME = 'skillbridge28'
 
 # JWT Helper Functions
-def generate_jwt(user_id, username):
+def generate_jwt(user_id, username,role):
     """Generate a JWT token for the given user ID."""
     payload = {
         'user_id': user_id,
          'username':username,
+         'role':role,
         'exp': datetime.utcnow() + timedelta(hours=24)  # Token expires in 24 hours
     }
     token = jwt.encode(payload, app.secret_key, algorithm='HS256')
@@ -120,7 +122,7 @@ class Login(Resource):
             return make_response(jsonify({'error': 'Invalid email or password'}), 401)
         
         # Generate JWT token
-        token = generate_jwt(user.user_id,user.username)
+        token = generate_jwt(user.user_id,user.username,user.role)
         return make_response(jsonify({"message": "Login successful", "token": token}), 200)
 
 class UserPost(Resource):
@@ -164,14 +166,6 @@ class UserResource(Resource):
         return make_response(jsonify(user.to_dict()), 200)
 
     def patch(self, user_id):
-        token = request.headers.get('Authorization')
-        if not token:
-            return make_response(jsonify({'error': 'Authorization token required'}), 401)
-        
-        decoded = decode_jwt(token)
-        if not decoded:
-            return make_response(jsonify({'error': 'Invalid or expired token'}), 401)
-        
         user = User.query.filter_by(user_id=user_id).first()
         if not user:
             return make_response(jsonify({'error': 'User not found'}), 404)
@@ -273,7 +267,7 @@ class Courses(Resource):
 
             # Create new course
             course = Course(
-                instructor_id=1,  # Use the logged-in user's ID
+                instructor_id= data.get('user_id'),
                 title=data.get('title'),
                 description=data.get('description'),
                 category=data.get('category'),
@@ -355,9 +349,14 @@ class Enrollments(Resource):
     
 class EnrollmentByCourseId(Resource):
     def get(self, course_id):
+        course = Course.query.filter_by(course_id=course_id).first()
+        if not course:
+            return make_response(jsonify({'error': 'Course not found'}), 404)
+        
         enrollments = Enrollment.query.filter_by(course_id=course_id).all()
         if not enrollments:
-            return make_response(jsonify({'error': 'No enrollments found for this course'}), 404)
+            return make_response(jsonify([]), 200)
+        
         return make_response(jsonify([enrollment.to_dict() for enrollment in enrollments]), 200)
 
 class Lessons(Resource):
@@ -483,21 +482,26 @@ class LessonByID(Resource):
             return make_response(jsonify(lesson.to_dict()),200)
         except Exception as e:
             return make_response(jsonify({'error': str(e)}), 500)
-
-class FileUpload(Resource):
-    def post(self):
+    def patch(self, lesson_id):
+        data = request.get_json()
         try:
-            if 'file' not in request.files:
-                return make_response(jsonify({'error': 'No file part'}), 400)
-            file = request.files['file']
-            if file.filename == '':
-                return make_response(jsonify({'error': 'No selected file'}), 400)
-            if file:
-                filename = secure_filename(file.filename)
-                unique_filename = f"{uuid.uuid4().hex}_{filename}"
-                s3.upload_fileobj(file, BUCKET_NAME, unique_filename)
-                file_url = f"https://{BUCKET_NAME}.s3.amazonaws.com/{unique_filename}"
-                return make_response(jsonify({'message': 'File uploaded successfully', 'file_url': file_url}), 200)
+            lesson = Lesson.query.filter_by(lesson_id=lesson_id).first()
+            if not lesson:
+                return make_response(jsonify({'error': 'Lesson not found'}), 404)
+            for key, value in data.items():
+                setattr(lesson, key, value)
+            db.session.commit()
+            return make_response(jsonify(lesson.to_dict()), 200)
+        except Exception as e:
+            return make_response(jsonify({'error': str(e)}), 500)
+    def delete(self, lesson_id):
+        try:
+            lesson = Lesson.query.filter_by(lesson_id=lesson_id).first()
+            if not lesson:
+                return make_response(jsonify({'error': 'Lesson not found'}), 404)
+            db.session.delete(lesson)
+            db.session.commit()
+            return make_response('', 204)
         except Exception as e:
             return make_response(jsonify({'error': str(e)}), 500)
 
@@ -600,38 +604,11 @@ class Comments(Resource):
             db.session.rollback()
             return make_response(jsonify({'error': str(e)}), 500)
 
-class CommentById(Resource):
-    def get(self, comment_id):
-        """Fetch a specific comment by ID."""
-        try:
-            comment = Comment.query.filter_by(comment_id=comment_id).first()
-            if not comment:
-                return make_response(jsonify({'error': 'Comment not found'}), 404)
-            
-            return make_response(jsonify(comment.to_dict()), 200)
-        except Exception as e:
-            return make_response(jsonify({'error': str(e)}), 500)
 
-    def patch(self, comment_id):
-        """Update a specific comment."""
-        try:
-            data = request.get_json()
-            user = User.query.filter_by(user_id=data.get('user_id')).first()
-            comment = Comment.query.filter_by(comment_id=comment_id).first()
-            if not comment:
-                return make_response(jsonify({'error': 'Comment not found'}), 404)
-            for key, value in data.items():
-                setattr(comment, key, value)
-            db.session.commit()
-            # Check and award badges if criteria met
-            check_and_award_badges(user)
-            return make_response(jsonify(comment.to_dict()), 200)
-        except Exception as e:
-            db.session.rollback()
-            return make_response(jsonify({'error': str(e)}), 500)
-
-    def delete(self, comment_id):
+    def delete(self):
         """Delete a specific comment."""
+        data = request.get_json()
+        comment_id = data.get('comment_id')
         try:
             comment = Comment.query.filter_by(comment_id=comment_id).first()
             if not comment:
@@ -644,6 +621,13 @@ class CommentById(Resource):
             return make_response(jsonify({'error': str(e)}), 500)
 
 class Lessonreviews(Resource):
+    def get(self):
+        """Fetch up to 3 lesson reviews with 5-star ratings."""
+        try:
+            lesson_reviews = LessonReview.query.filter_by(rating=5).limit(3).all()
+            return make_response(jsonify([review.to_dict() for review in lesson_reviews]), 200)
+        except Exception as e:
+            return make_response(jsonify({'error': str(e)}), 500)
     def post(self):
         try:
             data = request.get_json()
@@ -657,6 +641,20 @@ class Lessonreviews(Resource):
             db.session.add(lesson_review)
             db.session.commit()
             return make_response(jsonify(lesson_review.to_dict()), 201)
+        except Exception as e:
+            db.session.rollback()
+            return make_response(jsonify({'error': str(e)}), 500)
+
+    def delete(self):
+        try:
+            data = request.get_json()
+            review_id = data.get('review_id')
+            lesson_review = LessonReview.query.filter_by(review_id=review_id).first()
+            if not lesson_review:
+                return make_response(jsonify({'error': 'Review not found'}), 404)
+            db.session.delete(lesson_review)
+            db.session.commit()
+            return make_response('', 204)
         except Exception as e:
             db.session.rollback()
             return make_response(jsonify({'error': str(e)}), 500)
@@ -708,22 +706,24 @@ class LessonProgressResource(Resource):
         if not progress:
             return {"message": "Progress not found"}, 404
 
-        progress.watched_duration = watched_duration
-        progress.last_watched_date = datetime.utcnow()
+        # Only update watched_duration if the new value is greater than the current value
+        if watched_duration > progress.watched_duration:
+            progress.watched_duration = watched_duration
+            progress.last_watched_date = datetime.utcnow()
 
-        # Check and mark as completed if enough is watched
-        progress.check_completion()
+            # Check and mark as completed if enough is watched
+            progress.check_completion()
 
-        #award badge
-        check_and_award_badges(user)
+            # Award badge
+            check_and_award_badges(user)
 
+            # Update enrollment progress if exists
+            enrollment = Enrollment.query.filter_by(user_id=user_id, course_id=progress.lesson.course_id).first()
+            if enrollment:
+                enrollment.update_enrollment_progress()
 
-        db.session.commit()
-        # Update enrollment progress if exists
-        enrollment = Enrollment.query.filter_by(user_id=user_id, course_id=progress.lesson.course_id).first()   
-        
-        enrollment.update_enrollment_progress()       
-        
+            db.session.commit()
+
         return progress.to_dict(), 200
 
 
@@ -753,7 +753,7 @@ class Leaderboard(Resource):
             for user in users:
                 # Calculate total XP as the sum of XP from all badges the user has
                 total_xp = sum(user_badge.badge.xp_value for user_badge in UserBadge.query.filter_by(user_id=user.user_id).all())
-
+            
                 leaderboard.append({
                     "user_id": user.user_id,
                     "name": f"{user.first_name} {user.last_name}",
@@ -769,6 +769,7 @@ class Leaderboard(Resource):
         except Exception as e:
             return make_response(jsonify({'error': 'Failed to fetch leaderboard', 'details': str(e)}), 500)
 
+        
 # Add the new resource to the API
 api.add_resource(Leaderboard, '/leaderboard')
 
@@ -779,7 +780,6 @@ api.add_resource(UserProgressListResource, '/users/<int:user_id>/progress')
 api.add_resource(Signup, '/signup')
 api.add_resource(Lessonreviews, '/lessonreviews')
 api.add_resource(Login, '/login')
-api.add_resource(FileUpload, '/upload')
 api.add_resource(UserResource ,'/users/<int:user_id>')
 api.add_resource(CourseById, '/courses/<int:course_id>')
 api.add_resource(Courses, '/courses')
@@ -790,7 +790,6 @@ api.add_resource(UserPost, '/users')
 api.add_resource(Discussions, '/discussions')
 api.add_resource(DiscussionById, '/discussions/<int:discussion_id>')
 api.add_resource(Comments, '/comments')
-api.add_resource(CommentById, '/comments/<int:comment_id>')
 
 if __name__ == '__main__':
     app.run(debug=True)

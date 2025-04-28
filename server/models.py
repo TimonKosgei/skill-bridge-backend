@@ -151,6 +151,8 @@ class Enrollment(db.Model, SerializerMixin):
             enrollment.progress = progress_percentage
             # Mark the course as completed if all lessons are completed
             enrollment.is_completed = (completed_lessons == total_lessons and total_lessons > 0)
+            if enrollment.is_completed:
+                enrollment.completed_date = datetime.utcnow()
             db.session.commit()
 
 
