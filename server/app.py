@@ -59,6 +59,12 @@ def decode_jwt(token):
     except jwt.InvalidTokenError:
         return None  # Invalid token
 
+def update_model(instance, data, allowed_fields):
+    """Update the fields of a model instance with the provided data.
+    """
+    for key, value in data.items():
+        if key in allowed_fields:
+            setattr(instance, key, value)
 
 class Signup(Resource):
     def post(self):
@@ -100,7 +106,8 @@ class Signup(Resource):
             else:
                 return {"error": "Failed to send confirmation email"}, 500
         
-        
+        except IntegrityError:
+            return make_response(jsonify({'error': 'Username or email already in use'}), 400)
         except Exception as e:
             db.session.rollback()
             return {"error": str(e)}, 500
@@ -142,37 +149,6 @@ class Login(Resource):
         token = generate_jwt(user.user_id, user.username, user.role)
         return make_response(jsonify({"message": "Login successful", "token": token}), 200)
 
-class UserPost(Resource):
-    def post(self):
-        data = request.get_json()
-        try:
-            # Hash the password
-            hashed_password = bcrypt.hashpw(data.get('password').encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-
-            user = User(
-                username=data.get('username'),
-                email=data.get('email'),
-                password=hashed_password,  # Save the hashed password
-                first_name=data.get('first_name'),
-                last_name=data.get('last_name'),
-                profile_picture_url=data.get('profile_picture_url'),
-                bio=data.get('bio'),
-                role=data.get('role'),
-                registration_date=datetime.now()
-            )
-            db.session.add(user)
-            db.session.commit()
-            return make_response(user.to_dict(), 201)
-        except IntegrityError:
-            return make_response(jsonify({'error': 'Username or email already in use'}), 400)
-    def get(self):
-        user_id = 1
-        user = User.query.filter_by(user_id=user_id).first()
-        if not user:
-            return make_response(jsonify({'error': 'User not found'}), 404)
-        return make_response(jsonify(user.to_dict()), 200)
-    
-
     
 class UserResource(Resource):
     def get(self, user_id):
@@ -189,13 +165,14 @@ class UserResource(Resource):
         data = request.get_json()
         try:
             allowed_keys = ['username', 'email', 'password', 'first_name', 'last_name', 'profile_picture_url', 'bio', 'role']
-            for key, value in data.items():
-                if key in allowed_keys:
-                    setattr(user, key, value)
+            update_model(user, data, allowed_keys)  # Use the utility function
             db.session.commit()
             return user.to_dict()
         except IntegrityError:
             return make_response(jsonify({'error': 'Username or email already in use'}), 400)
+        except Exception as e:
+            db.session.rollback()
+            return make_response(jsonify({'error': str(e)}), 500)
 
     def delete(self, user_id):
         token = request.headers.get('Authorization')
@@ -229,11 +206,12 @@ class CourseById(Resource):
             course = Course.query.filter_by(course_id=course_id).first()
             if not course:
                 return make_response(jsonify({'error': 'Course not found'}), 404)
-            for key, value in data.items():
-                setattr(course, key, value)
+            allowed_keys = ['title', 'description', 'category', 'is_published', 'last_update']
+            update_model(course, data, allowed_keys)  # Use the utility function
             db.session.commit()
             return make_response(jsonify(course.to_dict()), 200)
         except Exception as e:
+            db.session.rollback()
             return make_response(jsonify({'error': str(e)}), 500)
     def delete(self, course_id):
         try:
@@ -352,11 +330,21 @@ class Enrollments(Resource):
 
     def patch(self):
         data = request.get_json()
+        show_contribution = data.get('show_celebration')
         enrollment = Enrollment.query.get(data['enrollment_id'])
-        for key, value in data.items():
-            setattr(enrollment, key, value)
-        db.session.commit()
-        return make_response(jsonify(enrollment.to_dict()), 200)
+        if not enrollment:
+            return make_response(jsonify({'error': 'Enrollment not found'}), 404)
+        try:
+            if show_contribution:
+                enrollment.show_celebration = True
+            allowed_keys = ['progress', 'is_completed','show_celebration']
+            update_model(enrollment, data, allowed_keys)  
+            db.session.commit()
+            return make_response(jsonify(enrollment.to_dict()), 200)
+        except Exception as e:
+            db.session.rollback()
+            return make_response(jsonify({'error': str(e)}), 500)
+
     def delete(self):
         data = request.get_json()
         enrollment = Enrollment.query.get(data['enrollment_id'])
@@ -463,32 +451,7 @@ class Lessons(Resource):
         except Exception as e:
             db.session.rollback()
             return make_response(jsonify({'error': 'Lesson creation failed', 'details': str(e)}), 500)
-    def patch(self):
-        data = request.get_json()
-        lesson_id = data.get('lesson_id')
-        try:
-            lesson = Lesson.query.filter_by(lesson_id=lesson_id).first()
-            if not lesson:
-                return make_response(jsonify({'error': 'Lesson not found'}), 404)
-            for key, value in data.items():
-                setattr(lesson, key, value)
-            db.session.commit()
-            return make_response(jsonify(lesson.to_dict()), 200)
-        except Exception as e:
-            return make_response(jsonify({'error': str(e)}), 500)
-        
-    def delete(self):
-        data = request.get_json()
-        lesson_id = data.get('lesson_id')
-        try:
-            lesson = Lesson.query.filter_by(lesson_id=lesson_id).first()
-            if not lesson:
-                return make_response(jsonify({'error': 'Lesson not found'}), 404)
-            db.session.delete(lesson)
-            db.session.commit()
-            return make_response('', 204)
-        except Exception as e:
-            return make_response(jsonify({'error': str(e)}), 500)
+    
 
 class LessonByID(Resource):
     def get(self, lesson_id):
@@ -500,28 +463,104 @@ class LessonByID(Resource):
         except Exception as e:
             return make_response(jsonify({'error': str(e)}), 500)
     def patch(self, lesson_id):
-        data = request.get_json()
+        # Get form data and file
+        data = request.form
+        file = request.files.get('file')
+
+        if not lesson_id:
+            return make_response(jsonify({'error': 'Lesson ID is required'}), 400)
+
         try:
             lesson = Lesson.query.filter_by(lesson_id=lesson_id).first()
             if not lesson:
                 return make_response(jsonify({'error': 'Lesson not found'}), 404)
-            for key, value in data.items():
-                setattr(lesson, key, value)
+
+            # Handle file upload if provided
+            if file:
+                try:
+                    # Create temp directory
+                    temp_dir = '/tmp/videos'
+                    os.makedirs(temp_dir, exist_ok=True)
+                    filename = secure_filename(file.filename)
+                    unique_filename = f"videos/{uuid.uuid4().hex}_{filename}"
+                    
+                    # Save temp file for duration calculation
+                    temp_path = f"/tmp/{unique_filename}"
+                    file.save(temp_path)
+
+                    # Calculate new duration
+                    with VideoFileClip(temp_path) as video:
+                        video_duration = video.duration
+
+                    # Upload to S3
+                    s3.upload_file(
+                        temp_path,
+                        BUCKET_NAME,
+                        unique_filename,
+                        ExtraArgs={'ContentType': file.content_type}
+                    )
+                    
+                    # Delete old video from S3 if exists
+                    if lesson.video_url:
+                        old_key = lesson.video_url.split(f'https://{BUCKET_NAME}.s3.amazonaws.com/')[-1]
+                        s3.delete_object(Bucket=BUCKET_NAME, Key=old_key)
+
+                    # Update lesson with new video
+                    lesson.video_url = f"https://{BUCKET_NAME}.s3.amazonaws.com/{unique_filename}"
+                    lesson.duration = video_duration
+
+                    # Cleanup temp file
+                    os.remove(temp_path)
+
+                except Exception as e:
+                    return make_response(jsonify({'error': 'Video update failed', 'details': str(e)}), 500)
+
+            # Update other fields
+            updatable_fields = ['title', 'description']
+            for field in updatable_fields:
+                if field in data:
+                    setattr(lesson, field, data.get(field))
+
             db.session.commit()
-            return make_response(jsonify(lesson.to_dict()), 200)
+            return make_response(jsonify({
+                'message': 'Lesson updated successfully',
+                'lesson': lesson.to_dict()
+            }), 200)
+
         except Exception as e:
+            db.session.rollback()
             return make_response(jsonify({'error': str(e)}), 500)
+        
     def delete(self, lesson_id):
+        data = request.get_json()
+        
+        if not lesson_id:
+            return make_response(jsonify({'error': 'Lesson ID is required'}), 400)
+
         try:
             lesson = Lesson.query.filter_by(lesson_id=lesson_id).first()
             if not lesson:
                 return make_response(jsonify({'error': 'Lesson not found'}), 404)
+
+            # Delete video from S3 if it exists
+            if lesson.video_url:
+                try:
+                    key = lesson.video_url.split(f'https://{BUCKET_NAME}.s3.amazonaws.com/')[-1]
+                    s3.delete_object(Bucket=BUCKET_NAME, Key=key)
+                except Exception as s3_error:
+                    # Log the error but continue with DB deletion
+                    current_app.logger.error(f"Failed to delete S3 object: {str(s3_error)}")
+
+            # Delete from database
             db.session.delete(lesson)
             db.session.commit()
+            
             return make_response('', 204)
-        except Exception as e:
-            return make_response(jsonify({'error': str(e)}), 500)
 
+        except Exception as e:
+            db.session.rollback()
+            return make_response(jsonify({'error': str(e)}), 500)
+        
 class Discussions(Resource):
     def get(self):
         """Fetch all discussions."""
@@ -679,6 +718,13 @@ class Lessonreviews(Resource):
 
 # 1. Update or create LessonProgress
 class LessonProgressResource(Resource):
+    def get(Self):
+        data = request.get_json()
+        user_id = data.get('user_id')
+        lessons = LessonProgress.query.filter_by(user_id=user_id).all()
+        if not lessons:
+            return make_response(jsonify({'error': 'No lessons found for this user'}), 404)
+        return make_response(jsonify([lesson.to_dict() for lesson in lessons]), 200)
     def post(self):
         data = request.get_json()
         user_id = data.get('user_id')
@@ -744,13 +790,6 @@ class LessonProgressResource(Resource):
         return progress.to_dict(), 200
 
 
-# 2. Get all lesson progress for a specific user
-class UserProgressListResource(Resource):
-    def get(self, user_id):
-        progress = LessonProgress.query.filter_by(user_id=user_id).all()
-        return [p.to_dict() for p in progress], 200
-
-
 class Badges(Resource):
     def get(self, user_id):
         user = User.query.filter_by(user_id=user_id).first()
@@ -776,6 +815,8 @@ class Leaderboard(Resource):
                     "name": f"{user.first_name} {user.last_name}",
                     "email": user.email,
                     "profile_picture": user.profile_picture_url,
+                    "bio":user.bio,
+                    "username": user.username,
                     "total_xp": total_xp
                 })
 
@@ -854,16 +895,66 @@ class ResetPassword(Resource):
 
         return {"message": "Password reset successfully"}, 200
 
-# Add the ResetPassword resource to the API
-api.add_resource(ResetPassword, '/reset-password')
+class ProfilePhoto(Resource):
+    def patch(self, user_id):
+        try:
+            # Get the user
+            user = User.query.filter_by(user_id=user_id).first()
+            if not user:
+                return make_response(jsonify({'error': 'User not found'}), 404)
 
-# Add the new resource to the API
+            # Get the file from request
+            file = request.files.get('file')
+            if not file:
+                return make_response(jsonify({'error': 'No file provided'}), 400)
+
+            # Delete old photo from S3 if it exists
+            if user.profile_picture_url:
+                try:
+                    old_key = user.profile_picture_url.split(f'https://{BUCKET_NAME}.s3.amazonaws.com/')[-1]
+                    s3.delete_object(Bucket=BUCKET_NAME, Key=old_key)
+                except Exception as s3_error:
+                    # Log the error but continue with new upload
+                    current_app.logger.error(f"Failed to delete old S3 object: {str(s3_error)}")
+
+            # Process and upload new photo
+            try:
+                # Secure the filename
+                filename = secure_filename(file.filename)
+                unique_filename = f"profile_photos/{uuid.uuid4().hex}_{filename}"
+                
+                # Upload to S3
+                s3.upload_fileobj(
+                    file,
+                    BUCKET_NAME,
+                    unique_filename,
+                    ExtraArgs={'ContentType': file.content_type}
+                )
+                
+                # Update user's profile picture URL
+                user.profile_picture_url = f"https://{BUCKET_NAME}.s3.amazonaws.com/{unique_filename}"
+                db.session.commit()
+
+                return make_response(jsonify({
+                    'message': 'Profile photo updated successfully',
+                    'profile_picture_url': user.profile_picture_url
+                }), 200)
+
+            except Exception as e:
+                db.session.rollback()
+                return make_response(jsonify({'error': 'Failed to upload new profile photo', 'details': str(e)}), 500)
+
+        except Exception as e:
+            return make_response(jsonify({'error': str(e)}), 500)
+
+# Api resources
+api.add_resource(ProfilePhoto, '/users/<int:user_id>/profile-photo')
+api.add_resource(ResetPassword, '/reset-password')
 api.add_resource(ForgotPassword, '/forgot-password')
 api.add_resource(Leaderboard, '/leaderboard')
 api.add_resource(Badges, '/users/<int:user_id>/badges')
 api.add_resource(EnrollmentByCourseId, '/enrollments/<int:course_id>')
 api.add_resource(LessonProgressResource, '/progress')
-api.add_resource(UserProgressListResource, '/users/<int:user_id>/progress')
 api.add_resource(Signup, '/signup')
 api.add_resource(Lessonreviews, '/lessonreviews')
 api.add_resource(Login, '/login')
@@ -873,7 +964,6 @@ api.add_resource(Courses, '/courses')
 api.add_resource(Enrollments, '/enrollments')
 api.add_resource(Lessons, '/lessons')
 api.add_resource(LessonByID, '/lessons/<int:lesson_id>')
-api.add_resource(UserPost, '/users')
 api.add_resource(Discussions, '/discussions')
 api.add_resource(DiscussionById, '/discussions/<int:discussion_id>')
 api.add_resource(Comments, '/comments')

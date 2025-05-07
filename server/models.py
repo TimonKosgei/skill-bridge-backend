@@ -120,6 +120,7 @@ class Enrollment(db.Model, SerializerMixin):
     progress = db.Column(db.Integer, default=0)  # Tracks progress as a percentage
     completed_date = db.Column(db.DateTime, nullable=True)  # Tracks when course was fully completed
     is_completed = db.Column(db.Boolean, default=False)
+    show_celebration = db.Column(db.Boolean, default=False)  # Tracks if the user has seen the celebration
     #relationship
     user = db.relationship('User', back_populates='enrollments')
     course = db.relationship('Course', back_populates='enrollments')
