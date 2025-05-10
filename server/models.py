@@ -173,7 +173,7 @@ class Discussion(db.Model, SerializerMixin):
     #relationship
     user = db.relationship('User', back_populates='discussions')
     course = db.relationship('Course', back_populates='discussions')
-    comments = db.relationship('Comment', back_populates=None)  # One-directional relationship
+    comments = db.relationship('Comment', back_populates='discussion', cascade='all, delete-orphan')
 
     # Custom property to access the user's username
     @property
@@ -191,6 +191,9 @@ class Comment(db.Model,SerializerMixin):
     discussion_id = db.Column(db.Integer, db.ForeignKey('discussions.discussion_id'), nullable=False)
     content = db.Column(db.String(255), nullable=False)
     comment_date = db.Column(db.DateTime, nullable=False)
+
+    # Add back reference to discussion
+    discussion = db.relationship('Discussion', back_populates='comments')
 
     # Custom property to access the user's username
     @property

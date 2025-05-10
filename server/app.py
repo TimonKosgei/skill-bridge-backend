@@ -201,15 +201,61 @@ class CourseById(Resource):
                 return make_response(jsonify({'error': 'Course not found'}), 404)
             return course.to_dict()
     def patch(self, course_id):
-        data = request.get_json()
+        # Get form data and file
+        data = request.form
+        file = request.files.get('file')
+
         try:
             course = Course.query.filter_by(course_id=course_id).first()
             if not course:
                 return make_response(jsonify({'error': 'Course not found'}), 404)
-            allowed_keys = ['title', 'description', 'category', 'is_published', 'last_update']
-            update_model(course, data, allowed_keys)  # Use the utility function
+
+            # Handle file upload if provided
+            if file:
+                try:
+                    # Delete old image from S3 if it exists
+                    if course.course_image_url:
+                        old_key = course.course_image_url.split(f'https://{BUCKET_NAME}.s3.amazonaws.com/')[-1]
+                        s3.delete_object(Bucket=BUCKET_NAME, Key=old_key)
+
+                    # Secure the filename
+                    filename = secure_filename(file.filename)
+                    unique_filename = f"course_images/{uuid.uuid4().hex}_{filename}"
+                    
+                    # Upload to S3
+                    s3.upload_fileobj(
+                        file,
+                        BUCKET_NAME,
+                        unique_filename,
+                        ExtraArgs={'ContentType': file.content_type}
+                    )
+                    
+                    # Update course with new image URL
+                    course.course_image_url = f"https://{BUCKET_NAME}.s3.amazonaws.com/{unique_filename}"
+
+                except Exception as e:
+                    return make_response(jsonify({'error': 'Image update failed', 'details': str(e)}), 500)
+
+            # Update other fields
+            updatable_fields = ['title', 'description', 'category']
+            for field in updatable_fields:
+                if field in data:
+                    setattr(course, field, data.get(field))
+            if data.get('is_published'):
+                if data.get('is_published') == 'true':
+                    course.is_published = True
+                else:
+                    course.is_published = False
+
+            # Update last_update timestamp
+            course.last_update = datetime.utcnow()
+
             db.session.commit()
-            return make_response(jsonify(course.to_dict()), 200)
+            return make_response(jsonify({
+                'message': 'Course updated successfully',
+                'course': course.to_dict()
+            }), 200)
+
         except Exception as e:
             db.session.rollback()
             return make_response(jsonify({'error': str(e)}), 500)
@@ -621,9 +667,13 @@ class DiscussionById(Resource):
     def delete(self, discussion_id):
         """Delete a specific discussion."""
         try:
+            data = request.get_json()
+            user_id = data.get('user_id')
             discussion = Discussion.query.filter_by(discussion_id=discussion_id).first()
             if not discussion:
                 return make_response(jsonify({'error': 'Discussion not found'}), 404)
+            if user_id != discussion.user_id:
+                return make_response(jsonify({'error': 'You are not authorized to delete this discussion'}), 403)
             db.session.delete(discussion)
             db.session.commit()
             return make_response('', 204)
@@ -802,21 +852,21 @@ class Leaderboard(Resource):
     def get(self):
         """Fetch users sorted by total XP."""
         try:
-            # Query all users
-            users = User.query.all()
+            # Query all learners
+            Learners = User.query.filter_by(role='Learner').all()
             leaderboard = []
 
-            for user in users:
+            for learner in Learners:
                 # Calculate total XP as the sum of XP from all badges the user has
-                total_xp = sum(user_badge.badge.xp_value for user_badge in UserBadge.query.filter_by(user_id=user.user_id).all())
+                total_xp = sum(learner_badge.badge.xp_value for learner_badge in UserBadge.query.filter_by(user_id=learner.user_id).all())
             
                 leaderboard.append({
-                    "user_id": user.user_id,
-                    "name": f"{user.first_name} {user.last_name}",
-                    "email": user.email,
-                    "profile_picture": user.profile_picture_url,
-                    "bio":user.bio,
-                    "username": user.username,
+                    "user_id": learner.user_id,
+                    "name": f"{learner.first_name} {learner.last_name}",
+                    "email": learner.email,
+                    "profile_picture": learner.profile_picture_url,
+                    "bio":learner.bio,
+                    "username": learner.username,
                     "total_xp": total_xp
                 })
 
