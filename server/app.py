@@ -16,6 +16,7 @@ from moviepy.video.io.VideoFileClip import VideoFileClip  # Import for video dur
 from badge_utils import check_and_award_badges
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from email_utils import configure_mail, confirm_token,send_email, generate_confirmation_token
+import json
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///app.db'
@@ -33,6 +34,39 @@ api = Api(app)
 # Amazon S3
 s3 = boto3.client('s3', verify = False)
 BUCKET_NAME = 'skillbridge28'
+
+# Configure S3 bucket policy to prevent direct downloads
+s3.put_bucket_policy(
+    Bucket=BUCKET_NAME,
+    Policy=json.dumps({
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "DenyPublicRead",
+                "Effect": "Deny",
+                "Principal": "*",
+                "Action": "s3:GetObject",
+                "Resource": f"arn:aws:s3:::{BUCKET_NAME}/*"
+            }
+        ]
+    })
+)
+
+# Configure CORS for the bucket
+s3.put_bucket_cors(
+    Bucket=BUCKET_NAME,
+    CORSConfiguration={
+        'CORSRules': [
+            {
+                'AllowedHeaders': ['*'],
+                'AllowedMethods': ['GET'],
+                'AllowedOrigins': ['http://localhost:3000'],  # Add your frontend domain
+                'ExposeHeaders': ['ETag'],
+                'MaxAgeSeconds': 3000
+            }
+        ]
+    }
+)
 
 # Configure email
 mail = configure_mail(app)
@@ -58,6 +92,31 @@ def decode_jwt(token):
         return None  # Token has expired
     except jwt.InvalidTokenError:
         return None  # Invalid token
+
+def token_required(f):
+    """Decorator to protect routes that require JWT authentication."""
+    def decorated(*args, **kwargs):
+        token = None
+        
+        # Get token from Authorization header
+        auth_header = request.headers.get('Authorization')
+        if auth_header and auth_header.startswith('Bearer '):
+            token = auth_header.split(' ')[1]
+        
+        if not token:
+            return make_response(jsonify({'error': 'Token is missing'}), 401)
+        
+        # Decode token
+        payload = decode_jwt(token)
+        if not payload:
+            return make_response(jsonify({'error': 'Invalid or expired token'}), 401)
+        
+        # Add user info to request context
+        request.user = payload
+        return f(*args, **kwargs)
+    
+    decorated.__name__ = f.__name__
+    return decorated
 
 def update_model(instance, data, allowed_fields):
     """Update the fields of a model instance with the provided data.
@@ -151,13 +210,14 @@ class Login(Resource):
 
     
 class UserResource(Resource):
+    @token_required
     def get(self, user_id):
-        
         user = User.query.filter_by(user_id=user_id).first()
         if not user:
             return make_response(jsonify({'error': 'User not found'}), 404)
         return make_response(jsonify(user.to_dict()), 200)
 
+    @token_required
     def patch(self, user_id):
         user = User.query.filter_by(user_id=user_id).first()
         if not user:
@@ -174,6 +234,7 @@ class UserResource(Resource):
             db.session.rollback()
             return make_response(jsonify({'error': str(e)}), 500)
 
+    @token_required
     def delete(self, user_id):
         token = request.headers.get('Authorization')
         if not token:
@@ -194,13 +255,20 @@ class UserResource(Resource):
             return make_response(jsonify({'error': str(e)}), 500)
 
 class CourseById(Resource):
+    @token_required
     def get(self, course_id):
         if course_id:
             course = Course.query.filter(Course.course_id == course_id).first()
             if not course:
                 return make_response(jsonify({'error': 'Course not found'}), 404)
             return course.to_dict()
+
+    @token_required
     def patch(self, course_id):
+        # Check if user is instructor or admin
+        if request.user['role'] not in ['Instructor', 'Admin']:
+            return make_response(jsonify({'error': 'Unauthorized - Only instructors and admins can update courses'}), 403)
+            
         # Get form data and file
         data = request.form
         file = request.files.get('file')
@@ -209,6 +277,10 @@ class CourseById(Resource):
             course = Course.query.filter_by(course_id=course_id).first()
             if not course:
                 return make_response(jsonify({'error': 'Course not found'}), 404)
+
+            # Check if user is the course instructor (unless admin)
+            if request.user['role'] != 'Admin' and course.instructor_id != request.user['user_id']:
+                return make_response(jsonify({'error': 'Unauthorized - You can only update your own courses'}), 403)
 
             # Handle file upload if provided
             if file:
@@ -259,11 +331,22 @@ class CourseById(Resource):
         except Exception as e:
             db.session.rollback()
             return make_response(jsonify({'error': str(e)}), 500)
+
+    @token_required
     def delete(self, course_id):
+        # Check if user is instructor or admin
+        if request.user['role'] not in ['Instructor', 'Admin']:
+            return make_response(jsonify({'error': 'Unauthorized - Only instructors and admins can delete courses'}), 403)
+
         try:
             course = Course.query.filter_by(course_id=course_id).first()
             if not course:
                 return make_response(jsonify({'error': 'Course not found'}), 404)
+
+            # Check if user is the course instructor (unless admin)
+            if request.user['role'] != 'Admin' and course.instructor_id != request.user['user_id']:
+                return make_response(jsonify({'error': 'Unauthorized - You can only delete your own courses'}), 403)
+
             db.session.delete(course)
             db.session.commit()
             return make_response('', 204)
@@ -271,17 +354,27 @@ class CourseById(Resource):
             return make_response(jsonify({'error': str(e)}), 500)
 
 class Courses(Resource):
+    @token_required
     def get(self):
         """Fetch all courses from the database."""
         try:
-            courses = Course.query.all()
+            # If user is an instructor or admin, show all their courses
+            if request.user['role'] in ['Instructor']:
+                courses = Course.query.filter_by(instructor_id=request.user['user_id']).all()
+            else:
+                # For regular users, only show published courses
+                courses = Course.query.filter_by(is_published=True).all()
             return jsonify([course.to_dict() for course in courses])
         except Exception as e:
             return make_response(jsonify({'error': 'Error fetching courses', 'details': str(e)}), 500)
 
+    @token_required
     def post(self):
         """Handles course creation with file upload."""
         try:
+            # Check if user is instructor or admin
+            if request.user['role'] not in ['Instructor', 'Admin']:
+                return make_response(jsonify({'error': 'Unauthorized - Only instructors and admins can create courses'}), 403)
             
             data = request.form
             file = request.files.get('file') 
@@ -308,14 +401,14 @@ class Courses(Resource):
 
             # Create new course
             course = Course(
-                instructor_id= data.get('user_id'),
+                instructor_id=request.user['user_id'],
                 title=data.get('title'),
                 description=data.get('description'),
                 category=data.get('category'),
                 creation_date=datetime.utcnow(),
                 last_update=datetime.utcnow(),
                 course_image_url=file_url,
-                is_published=True
+                is_published=data.get('is_published') == 'true'  # Convert string to boolean
             )
 
             # Save to database
@@ -329,10 +422,12 @@ class Courses(Resource):
             return make_response(jsonify({'error': 'Course creation failed', 'details': str(e)}), 500)
 
 class Enrollments(Resource):
+    @token_required
     def get(self):
         enrollments = Enrollment.query.all()
         return make_response(jsonify([enrollment.to_dict() for enrollment in enrollments]), 200)
 
+    @token_required
     def post(self):
         data = request.get_json()
         user_id = data.get("user_id")
@@ -374,6 +469,7 @@ class Enrollments(Resource):
 
         return make_response(jsonify(enrollment.to_dict()), 201)
 
+    @token_required
     def patch(self):
         data = request.get_json()
         show_contribution = data.get('show_celebration')
@@ -391,6 +487,7 @@ class Enrollments(Resource):
             db.session.rollback()
             return make_response(jsonify({'error': str(e)}), 500)
 
+    @token_required
     def delete(self):
         data = request.get_json()
         enrollment = Enrollment.query.get(data['enrollment_id'])
@@ -399,6 +496,7 @@ class Enrollments(Resource):
         return make_response('', 204)
     
 class EnrollmentByCourseId(Resource):
+    @token_required
     def get(self, course_id):
         course = Course.query.filter_by(course_id=course_id).first()
         if not course:
@@ -411,6 +509,7 @@ class EnrollmentByCourseId(Resource):
         return make_response(jsonify([enrollment.to_dict() for enrollment in enrollments]), 200)
 
 class Lessons(Resource):
+    @token_required
     def get(self):
         data = request.get_json()
         course_id = data.get('course_id')
@@ -423,7 +522,11 @@ class Lessons(Resource):
         except Exception as e:
             return make_response(jsonify({'error': str(e)}), 500)
         
+    @token_required
     def post(self):
+        # Check if user is instructor or admin
+        if request.user['role'] not in ['Instructor', 'Admin']:
+            return make_response(jsonify({'error': 'Unauthorized - Only instructors and admins can create lessons'}), 403)
 
         # Get form data
         data = request.form
@@ -440,6 +543,10 @@ class Lessons(Resource):
         course = Course.query.filter_by(course_id=data.get('course_id')).first()
         if not course:
             return make_response(jsonify({'error': 'Course not found'}), 404)
+
+        # Check if user is the course instructor (unless admin)
+        if request.user['role'] != 'Admin' and course.instructor_id != request.user['user_id']:
+            return make_response(jsonify({'error': 'Unauthorized - You can only add lessons to your own courses'}), 403)
 
         # Handle file upload
         video_url = None
@@ -500,6 +607,7 @@ class Lessons(Resource):
     
 
 class LessonByID(Resource):
+    @token_required
     def get(self, lesson_id):
         try:
             lesson = Lesson.query.filter_by(lesson_id  = lesson_id).first()
@@ -508,7 +616,13 @@ class LessonByID(Resource):
             return make_response(jsonify(lesson.to_dict()),200)
         except Exception as e:
             return make_response(jsonify({'error': str(e)}), 500)
+
+    @token_required
     def patch(self, lesson_id):
+        # Check if user is instructor or admin
+        if request.user['role'] not in ['Instructor', 'Admin']:
+            return make_response(jsonify({'error': 'Unauthorized - Only instructors and admins can update lessons'}), 403)
+
         # Get form data and file
         data = request.form
         file = request.files.get('file')
@@ -520,6 +634,11 @@ class LessonByID(Resource):
             lesson = Lesson.query.filter_by(lesson_id=lesson_id).first()
             if not lesson:
                 return make_response(jsonify({'error': 'Lesson not found'}), 404)
+
+            # Check if user is the course instructor (unless admin)
+            course = Course.query.filter_by(course_id=lesson.course_id).first()
+            if request.user['role'] != 'Admin' and course.instructor_id != request.user['user_id']:
+                return make_response(jsonify({'error': 'Unauthorized - You can only update lessons in your own courses'}), 403)
 
             # Handle file upload if provided
             if file:
@@ -577,7 +696,12 @@ class LessonByID(Resource):
             db.session.rollback()
             return make_response(jsonify({'error': str(e)}), 500)
         
+    @token_required
     def delete(self, lesson_id):
+        # Check if user is instructor or admin
+        if request.user['role'] not in ['Instructor', 'Admin']:
+            return make_response(jsonify({'error': 'Unauthorized - Only instructors and admins can delete lessons'}), 403)
+
         data = request.get_json()
         
         if not lesson_id:
@@ -587,6 +711,11 @@ class LessonByID(Resource):
             lesson = Lesson.query.filter_by(lesson_id=lesson_id).first()
             if not lesson:
                 return make_response(jsonify({'error': 'Lesson not found'}), 404)
+
+            # Check if user is the course instructor (unless admin)
+            course = Course.query.filter_by(course_id=lesson.course_id).first()
+            if request.user['role'] != 'Admin' and course.instructor_id != request.user['user_id']:
+                return make_response(jsonify({'error': 'Unauthorized - You can only delete lessons from your own courses'}), 403)
 
             # Delete video from S3 if it exists
             if lesson.video_url:
@@ -608,6 +737,7 @@ class LessonByID(Resource):
             return make_response(jsonify({'error': str(e)}), 500)
         
 class Discussions(Resource):
+    @token_required
     def get(self):
         """Fetch all discussions."""
         course_id = request.args.get("course_id")
@@ -617,6 +747,7 @@ class Discussions(Resource):
         except Exception as e:
             return make_response(jsonify({'error': str(e)}), 500)
 
+    @token_required
     def post(self):
         """Create a new discussion."""
         try:
@@ -639,6 +770,7 @@ class Discussions(Resource):
             return make_response(jsonify({'error': str(e)}), 500)
 
 class DiscussionById(Resource):
+    @token_required
     def get(self, discussion_id):
         """Fetch a specific discussion by ID."""
         try:
@@ -649,6 +781,7 @@ class DiscussionById(Resource):
         except Exception as e:
             return make_response(jsonify({'error': str(e)}), 500)
 
+    @token_required
     def patch(self, discussion_id):
         """Update a specific discussion."""
         try:
@@ -664,6 +797,7 @@ class DiscussionById(Resource):
             db.session.rollback()
             return make_response(jsonify({'error': str(e)}), 500)
 
+    @token_required
     def delete(self, discussion_id):
         """Delete a specific discussion."""
         try:
@@ -682,6 +816,7 @@ class DiscussionById(Resource):
             return make_response(jsonify({'error': str(e)}), 500)
 
 class Comments(Resource):
+    @token_required
     def get(self):
         """Fetch all comments."""
         try:
@@ -690,6 +825,7 @@ class Comments(Resource):
         except Exception as e:
             return make_response(jsonify({'error': str(e)}), 500)
 
+    @token_required
     def post(self):
         """Create a new comment."""
         try:
@@ -710,7 +846,7 @@ class Comments(Resource):
             db.session.rollback()
             return make_response(jsonify({'error': str(e)}), 500)
 
-
+    @token_required
     def delete(self):
         """Delete a specific comment."""
         data = request.get_json()
@@ -727,6 +863,7 @@ class Comments(Resource):
             return make_response(jsonify({'error': str(e)}), 500)
 
 class Lessonreviews(Resource):
+    @token_required
     def get(self):
         """Fetch up to 3 lesson reviews with 5-star ratings."""
         try:
@@ -734,6 +871,8 @@ class Lessonreviews(Resource):
             return make_response(jsonify([review.to_dict() for review in lesson_reviews]), 200)
         except Exception as e:
             return make_response(jsonify({'error': str(e)}), 500)
+
+    @token_required
     def post(self):
         try:
             data = request.get_json()
@@ -751,6 +890,7 @@ class Lessonreviews(Resource):
             db.session.rollback()
             return make_response(jsonify({'error': str(e)}), 500)
 
+    @token_required
     def delete(self):
         try:
             data = request.get_json()
@@ -768,6 +908,7 @@ class Lessonreviews(Resource):
 
 # 1. Update or create LessonProgress
 class LessonProgressResource(Resource):
+    @token_required
     def get(Self):
         data = request.get_json()
         user_id = data.get('user_id')
@@ -775,6 +916,8 @@ class LessonProgressResource(Resource):
         if not lessons:
             return make_response(jsonify({'error': 'No lessons found for this user'}), 404)
         return make_response(jsonify([lesson.to_dict() for lesson in lessons]), 200)
+
+    @token_required
     def post(self):
         data = request.get_json()
         user_id = data.get('user_id')
@@ -808,6 +951,8 @@ class LessonProgressResource(Resource):
 
         db.session.commit()
         return progress.to_dict(), 200
+
+    @token_required
     def patch(self):
         data = request.get_json()
         user_id = data.get('user_id')
@@ -841,6 +986,7 @@ class LessonProgressResource(Resource):
 
 
 class Badges(Resource):
+    @token_required
     def get(self, user_id):
         user = User.query.filter_by(user_id=user_id).first()
         if not user:
@@ -848,7 +994,23 @@ class Badges(Resource):
         badges = UserBadge.query.filter_by(user_id=user_id).all()
         return make_response(jsonify([badge.to_dict() for badge in badges]), 200)
 
+class MarkBadgeNotificationShown(Resource):
+    @token_required
+    def patch(self, user_badge_id):
+        user_badge = UserBadge.query.get(user_badge_id)
+        if not user_badge:
+            return make_response(jsonify({'error': 'Badge not found'}), 404)
+        
+        user_badge.notification_shown = True
+        try:
+            db.session.commit()
+            return make_response(jsonify({'message': 'Badge notification marked as shown'}), 200)
+        except Exception as e:
+            db.session.rollback()
+            return make_response(jsonify({'error': str(e)}), 500)
+
 class Leaderboard(Resource):
+    @token_required
     def get(self):
         """Fetch users sorted by total XP."""
         try:
@@ -946,6 +1108,7 @@ class ResetPassword(Resource):
         return {"message": "Password reset successfully"}, 200
 
 class ProfilePhoto(Resource):
+    @token_required
     def patch(self, user_id):
         try:
             # Get the user
@@ -997,6 +1160,62 @@ class ProfilePhoto(Resource):
         except Exception as e:
             return make_response(jsonify({'error': str(e)}), 500)
 
+class PublicCourses(Resource):
+    def get(self):
+        """Fetch all published courses from the database for public access."""
+        try:
+            courses = Course.query.filter_by(is_published=True).all()
+            return jsonify([course.to_dict() for course in courses])
+        except Exception as e:
+            return make_response(jsonify({'error': 'Error fetching courses', 'details': str(e)}), 500)
+
+class PublicLessonReviews(Resource):
+    def get(self):
+        """Fetch public lesson reviews for the landing page."""
+        try:
+            # Add debug logging
+            print("Attempting to fetch lesson reviews...")
+            # Join with user table to ensure user relationship is loaded
+            reviews = LessonReview.query.join(User).order_by(LessonReview.review_date.desc()).limit(6).all()
+            print(f"Found {len(reviews)} reviews")
+            serialized_reviews = [review.to_dict() for review in reviews]
+            print("Successfully serialized reviews")
+            return jsonify(serialized_reviews)
+        except Exception as e:
+            print(f"Error in PublicLessonReviews: {str(e)}")
+            print(f"Error type: {type(e)}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
+            return make_response(jsonify({'error': 'Error fetching reviews', 'details': str(e)}), 500)
+
+class VideoAccess(Resource):
+    @token_required
+    def get(self):
+        data = request.get_json()
+        video_url = data.get('video_url')
+        
+        if not video_url:
+            return make_response(jsonify({'error': 'Video URL is required'}), 400)
+            
+        try:
+            # Extract the key from the full S3 URL
+            key = video_url.split(f'https://{BUCKET_NAME}.s3.amazonaws.com/')[-1]
+            
+            # Generate a signed URL that expires in 1 hour
+            signed_url = s3.generate_presigned_url(
+                'get_object',
+                Params={
+                    'Bucket': BUCKET_NAME,
+                    'Key': key
+                },
+                ExpiresIn=3600  # URL expires in 1 hour
+            )
+            
+            return make_response(jsonify({'signed_url': signed_url}), 200)
+            
+        except Exception as e:
+            return make_response(jsonify({'error': str(e)}), 500)
+
 # Api resources
 api.add_resource(ProfilePhoto, '/users/<int:user_id>/profile-photo')
 api.add_resource(ResetPassword, '/reset-password')
@@ -1018,6 +1237,10 @@ api.add_resource(Discussions, '/discussions')
 api.add_resource(DiscussionById, '/discussions/<int:discussion_id>')
 api.add_resource(Comments, '/comments')
 api.add_resource(ConfirmEmail, '/confirm/<string:token>')
+api.add_resource(PublicCourses, '/public/courses')
+api.add_resource(PublicLessonReviews, '/public/lessonreviews')
+api.add_resource(MarkBadgeNotificationShown, '/user-badges/<int:user_badge_id>/mark-shown')
+api.add_resource(VideoAccess, '/video-access')
 
 if __name__ == '__main__':
     app.run(debug=True)

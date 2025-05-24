@@ -81,9 +81,9 @@ class Course(db.Model, SerializerMixin):
 
     #relationship
     instructor = db.relationship('User', back_populates='courses')
-    lessons = db.relationship('Lesson', back_populates='course')
-    enrollments = db.relationship('Enrollment', back_populates='course')
-    discussions = db.relationship('Discussion', back_populates='course')
+    lessons = db.relationship('Lesson', back_populates='course', cascade='all, delete-orphan')
+    enrollments = db.relationship('Enrollment', back_populates='course', cascade='all, delete-orphan')
+    discussions = db.relationship('Discussion', back_populates='course', cascade='all, delete-orphan')
 
     #serialization-rules
     serialize_rules = ('-instructor.courses',
@@ -103,8 +103,8 @@ class Lesson(db.Model, SerializerMixin):
     duration = db.Column(db.Integer, nullable=True)
     #relationship
     course = db.relationship('Course', back_populates='lessons')
-    lesson_reviews = db.relationship('LessonReview', back_populates='lesson')
-    lesson_progress = db.relationship('LessonProgress', back_populates='lesson')
+    lesson_reviews = db.relationship('LessonReview', back_populates='lesson', cascade='all, delete-orphan')
+    lesson_progress = db.relationship('LessonProgress', back_populates='lesson', cascade='all, delete-orphan')
 
     #serialization-rules
     serialize_rules = ('-course.lessons','-lesson_reviews.lesson','-lesson_progress.lesson',)
@@ -179,9 +179,12 @@ class Discussion(db.Model, SerializerMixin):
     @property
     def user_username(self):
         return self.user.username if self.user else None
+    @property
+    def user_profile_picture_url(self):
+        return self.user.profile_picture_url if self.user else None
 
     #serialization-rules
-    serialize_rules = ('-user', '-course', '-comments', 'user_username')  # Include user_username
+    serialize_rules = ('-user', '-course', '-comments', 'user_username','user_profile_picture_url')  # Include user_username
 
 class Comment(db.Model,SerializerMixin):
     __tablename__ = 'comments'
@@ -230,14 +233,17 @@ class LessonReview(db.Model, SerializerMixin):
         '-user',         
         '-lesson',       
         'user_username',  
-        'user_first_name' 
+        'user_first_name',
+        'user_profile_picture_url'
     )
 
     # Custom property: Username
     @property
     def user_username(self):
         return self.user.username if self.user else None
-
+    @property
+    def user_profile_picture_url(self):
+        return self.user.profile_picture_url if self.user else None
     # Custom property: First Name
     @property
     def user_first_name(self):
@@ -305,6 +311,7 @@ class UserBadge(db.Model, SerializerMixin):
     user_id = db.Column(db.Integer, db.ForeignKey('users.user_id'), nullable=False)
     badge_id = db.Column(db.Integer, db.ForeignKey('badges.badge_id'), nullable=False)
     earned_date = db.Column(db.DateTime, default=datetime.utcnow)
+    notification_shown = db.Column(db.Boolean, default=False)
     
     # Relationships
     user = db.relationship('User', back_populates='badges')
