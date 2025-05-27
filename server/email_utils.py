@@ -7,7 +7,7 @@ mail = None  # Declare a global variable for the mail object
 def configure_mail(app):
     global mail  # Use the global variable
     app.config['SECRET_KEY'] = "PrinceZoku@2025//fjkjff48300/"
-    app.config['MAIL_SERVER'] = 'smtp.gmail.com'  # Replace with your email provider's SMTP server
+    app.config['MAIL_SERVER'] = 'smtp.gmail.com'  
     app.config['MAIL_PORT'] = 587
     app.config['MAIL_USE_TLS'] = True
     app.config['MAIL_USERNAME'] = 'mail.skillbridge@gmail.com'  

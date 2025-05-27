@@ -42,11 +42,13 @@ s3.put_bucket_policy(
         "Version": "2012-10-17",
         "Statement": [
             {
-                "Sid": "DenyPublicRead",
-                "Effect": "Deny",
+                "Sid": "AllowPublicRead",
+                "Effect": "Allow",
                 "Principal": "*",
                 "Action": "s3:GetObject",
-                "Resource": f"arn:aws:s3:::{BUCKET_NAME}/*"
+                "Resource": [
+                    f"arn:aws:s3:::{BUCKET_NAME}/*"
+                ]
             }
         ]
     })
@@ -60,7 +62,12 @@ s3.put_bucket_cors(
             {
                 'AllowedHeaders': ['*'],
                 'AllowedMethods': ['GET'],
-                'AllowedOrigins': ['http://localhost:3000'],  # Add your frontend domain
+                'AllowedOrigins': [
+                    'http://localhost:3000',
+                    'http://127.0.0.1:3000',
+                    'http://localhost:5173',  # Vite default port
+                    'http://127.0.0.1:5173'   # Vite default port
+                ],
                 'ExposeHeaders': ['ETag'],
                 'MaxAgeSeconds': 3000
             }
@@ -952,38 +959,6 @@ class LessonProgressResource(Resource):
         db.session.commit()
         return progress.to_dict(), 200
 
-    @token_required
-    def patch(self):
-        data = request.get_json()
-        user_id = data.get('user_id')
-        lesson_id = data.get('lesson_id')
-        watched_duration = data.get('watched_duration')
-
-        user = User.query.get(user_id)
-        progress = LessonProgress.query.filter_by(user_id=user_id, lesson_id=lesson_id).first()
-        if not progress:
-            return {"message": "Progress not found"}, 404
-
-        # Only update watched_duration if the new value is greater than the current value
-        if watched_duration > progress.watched_duration:
-            progress.watched_duration = watched_duration
-            progress.last_watched_date = datetime.utcnow()
-
-            # Check and mark as completed if enough is watched
-            progress.check_completion()
-
-            # Award badge
-            check_and_award_badges(user)
-
-            # Update enrollment progress if exists
-            enrollment = Enrollment.query.filter_by(user_id=user_id, course_id=progress.lesson.course_id).first()
-            if enrollment:
-                enrollment.update_enrollment_progress()
-
-            db.session.commit()
-
-        return progress.to_dict(), 200
-
 
 class Badges(Resource):
     @token_required
@@ -1188,34 +1163,6 @@ class PublicLessonReviews(Resource):
             print(f"Traceback: {traceback.format_exc()}")
             return make_response(jsonify({'error': 'Error fetching reviews', 'details': str(e)}), 500)
 
-class VideoAccess(Resource):
-    @token_required
-    def get(self):
-        data = request.get_json()
-        video_url = data.get('video_url')
-        
-        if not video_url:
-            return make_response(jsonify({'error': 'Video URL is required'}), 400)
-            
-        try:
-            # Extract the key from the full S3 URL
-            key = video_url.split(f'https://{BUCKET_NAME}.s3.amazonaws.com/')[-1]
-            
-            # Generate a signed URL that expires in 1 hour
-            signed_url = s3.generate_presigned_url(
-                'get_object',
-                Params={
-                    'Bucket': BUCKET_NAME,
-                    'Key': key
-                },
-                ExpiresIn=3600  # URL expires in 1 hour
-            )
-            
-            return make_response(jsonify({'signed_url': signed_url}), 200)
-            
-        except Exception as e:
-            return make_response(jsonify({'error': str(e)}), 500)
-
 # Api resources
 api.add_resource(ProfilePhoto, '/users/<int:user_id>/profile-photo')
 api.add_resource(ResetPassword, '/reset-password')
@@ -1240,7 +1187,6 @@ api.add_resource(ConfirmEmail, '/confirm/<string:token>')
 api.add_resource(PublicCourses, '/public/courses')
 api.add_resource(PublicLessonReviews, '/public/lessonreviews')
 api.add_resource(MarkBadgeNotificationShown, '/user-badges/<int:user_badge_id>/mark-shown')
-api.add_resource(VideoAccess, '/video-access')
 
 if __name__ == '__main__':
     app.run(debug=True)
